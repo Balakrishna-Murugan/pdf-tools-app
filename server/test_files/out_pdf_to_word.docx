@@ -1,0 +1,11 @@
+HTTP/1.1 500 Internal Server Error
+X-Powered-By: Express
+Access-Control-Allow-Origin: *
+Content-Type: application/json; charset=utf-8
+Content-Length: 76
+ETag: W/"4c-h8/rT1u6p4c5cajmJTlVKAGndx0"
+Date: Mon, 16 Mar 2026 02:39:55 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+
+{"error":"PDF to Word failed","details":"packer.toBuffer is not a function"}

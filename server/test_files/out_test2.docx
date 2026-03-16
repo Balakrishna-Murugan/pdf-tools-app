@@ -1,0 +1,1 @@
+{"error":"PDF to Word failed: pdftotext (Poppler) not found on the server. Install Poppler or set PDFTOTEXT_BIN to the pdftotext executable path."}

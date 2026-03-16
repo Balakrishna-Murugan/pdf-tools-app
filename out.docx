@@ -1,0 +1,11 @@
+HTTP/1.1 500 Internal Server Error
+X-Powered-By: Express
+Access-Control-Allow-Origin: *
+Content-Type: application/json; charset=utf-8
+Content-Length: 148
+ETag: W/"94-16he8sIebHJKwsyFqtLkn6WvOxw"
+Date: Mon, 16 Mar 2026 02:32:27 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+
+{"error":"Conversion failed","details":"'soffice.exe' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n"}
