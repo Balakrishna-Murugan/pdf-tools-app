@@ -53,57 +53,111 @@ async function wordToPdf(req, res) {
   });
 }
 
-// Convert PDF to DOCX by extracting text and writing a simple .docx
+// Convert PDF to DOCX using selectable engine and robust fallback
 async function pdfToWord(req, res) {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const inputPath = req.file.path;
   const outputFilename = path.basename(inputPath, path.extname(inputPath)) + '.docx';
   const outputPath = path.join(OUTPUT_DIR, outputFilename);
+  const engine = (process.env.PDF_TO_WORD_ENGINE || 'libreoffice').toLowerCase();
 
-  try {
-    // Try pdf-parse first
+  async function textFallback() {
     let text = '';
     try {
       const dataBuffer = await fs.readFile(inputPath);
       const data = await pdfParse(dataBuffer);
       text = data.text || '';
     } catch (parseErr) {
-      // pdf-parse failed; try pdftotext (Poppler) as a fallback
-      console.warn('pdf-parse failed, attempting pdftotext fallback:', parseErr.message);
+      console.warn('[pdfToWord] pdf-parse failed, using pdftotext:', parseErr.message);
       const pdftotextCmd = process.env.PDFTOTEXT_BIN || (process.platform === 'win32' ? 'pdftotext.exe' : 'pdftotext');
-      // Use -enc UTF-8 and - to write to stdout
       const cmd = `"${pdftotextCmd}" -enc UTF-8 "${inputPath}" -`;
-      console.log('[pdfToWord] pdftotext command:', cmd);
-      try {
-        text = await new Promise((resolve, reject) => {
-          exec(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 2 * 60 * 1000 }, (err, stdout, stderr) => {
-            console.log('[pdfToWord] pdftotext stdout:', stdout);
-            console.log('[pdfToWord] pdftotext stderr:', stderr);
-            if (err) return reject(new Error(`pdftotext failed: ${stderr || err.message}`));
-            resolve(stdout || '');
-          });
+      text = await new Promise((resolve, reject) => {
+        exec(cmd, { maxBuffer: 15 * 1024 * 1024, timeout: 2 * 60 * 1000 }, (err, stdout, stderr) => {
+          if (err) return reject(new Error(`pdftotext failed: ${stderr || err.message}`));
+          resolve(stdout || '');
         });
-      } catch (pdftotextErr) {
-        // Neither pdf-parse nor pdftotext worked
-        await cleanup([inputPath]);
-        // If pdftotext isn't available, give a clear message
-        const msg = (pdftotextErr && pdftotextErr.message) || '';
-        if (msg.includes('ENOENT') || msg.toLowerCase().includes('not found') || msg.toLowerCase().includes('pdftotext')) {
-          return res.status(500).json({ error: 'PDF to Word failed: pdftotext (Poppler) not found on the server. Install Poppler or set PDFTOTEXT_BIN to the pdftotext executable path.' });
-        }
-        return res.status(500).json({ error: 'PDF to Word failed: unable to extract text from PDF', details: pdftotextErr.message });
-      }
+      });
     }
-
-    // Create a simple docx from extracted text
     const doc = new Document({ sections: [{ properties: {}, children: [new Paragraph(text || ' ')] }] });
     const buffer = await Packer.toBuffer(doc);
     await fs.writeFile(outputPath, buffer);
-
-    res.download(outputPath, outputFilename, async (err) => {
+    return res.download(outputPath, outputFilename, async (err) => {
       await cleanup([inputPath, outputPath]);
       if (err) console.error('Download error', err);
     });
+  }
+
+  try {
+    if (engine === 'cloud') {
+      return res.status(500).json({ error: 'PDF to Word cloud engine not configured. Set up cloud conversion provider and configure PDF_TO_WORD_CLOUD_API_KEY.' });
+    }
+
+    if (engine !== 'libreoffice' && engine !== 'text') {
+      return res.status(400).json({ error: 'Invalid PDF_TO_WORD_ENGINE. Valid values: libreoffice, text, cloud' });
+    }
+
+    if (engine === 'text') {
+      return await textFallback();
+    }
+
+    const sofficeCmd = process.env.LIBREOFFICE_BIN || (process.platform === 'win32' ? 'soffice.exe' : 'soffice');
+    const convertCmd = `"${sofficeCmd}" --headless --infilter=writer_pdf_import --convert-to docx --outdir "${OUTPUT_DIR}" "${inputPath}"`;
+    console.log('[pdfToWord] LibreOffice convert command:', convertCmd);
+
+    try {
+      await new Promise((resolve, reject) => {
+        exec(convertCmd, { timeout: 4 * 60 * 1000 }, (err, stdout, stderr) => {
+          console.log('[pdfToWord] soffice stdout:', stdout);
+          console.log('[pdfToWord] soffice stderr:', stderr);
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+      if (await fs.pathExists(outputPath)) {
+        return res.download(outputPath, outputFilename, async (err) => {
+          await cleanup([inputPath, outputPath]);
+          if (err) console.error('Download error', err);
+        });
+      }
+    } catch (libreErr) {
+      console.warn('[pdfToWord] LibreOffice conversion failed:', libreErr.message || libreErr);
+    }
+
+    const odtPath = path.join(OUTPUT_DIR, path.basename(inputPath, path.extname(inputPath)) + '.odt');
+    const convertCmdOdt = `"${sofficeCmd}" --headless --convert-to odt --outdir "${OUTPUT_DIR}" "${inputPath}"`;
+    try {
+      await new Promise((resolve, reject) => {
+        exec(convertCmdOdt, { timeout: 4 * 60 * 1000 }, (err, stdout, stderr) => {
+          console.log('[pdfToWord] odt stdout:', stdout);
+          console.log('[pdfToWord] odt stderr:', stderr);
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+      if (await fs.pathExists(odtPath)) {
+        const convertCmdDocx = `"${sofficeCmd}" --headless --convert-to docx --outdir "${OUTPUT_DIR}" "${odtPath}"`;
+        await new Promise((resolve, reject) => {
+          exec(convertCmdDocx, { timeout: 3 * 60 * 1000 }, (err, stdout, stderr) => {
+            console.log('[pdfToWord] odt->docx stdout:', stdout);
+            console.log('[pdfToWord] odt->docx stderr:', stderr);
+            if (err) return reject(err);
+            resolve();
+          });
+        });
+        if (await fs.pathExists(outputPath)) {
+          await cleanup([inputPath, odtPath]);
+          return res.download(outputPath, outputFilename, async (err) => {
+            await cleanup([outputPath]);
+            if (err) console.error('Download error', err);
+          });
+        }
+      }
+    } catch (odtErr) {
+      console.warn('[pdfToWord] ODT fallback failed:', odtErr.message || odtErr);
+    }
+
+    // final fallback to text
+    return await textFallback();
   } catch (err) {
     await cleanup([inputPath]);
     res.status(500).json({ error: 'PDF to Word failed', details: err.message });
