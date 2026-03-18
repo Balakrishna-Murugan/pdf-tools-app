@@ -1,10 +1,8 @@
 const path = require('path');
 const fs = require('fs-extra');
-const { exec } = require('child_process');
-const pdfParse = require('pdf-parse');
-const { Document, Packer, Paragraph, TextRun } = require('docx');
+const { exec, execFile } = require('child_process');
 const { PDFDocument } = require('pdf-lib');
-const mime = require('mime-types');
+const { convertPdfToWord } = require('../services/pdfToWordService');
 
 const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
 const OUTPUT_DIR = path.join(__dirname, '..', 'outputs');
@@ -57,110 +55,21 @@ async function wordToPdf(req, res) {
 async function pdfToWord(req, res) {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const inputPath = req.file.path;
-  const outputFilename = path.basename(inputPath, path.extname(inputPath)) + '.docx';
-  const outputPath = path.join(OUTPUT_DIR, outputFilename);
-  const engine = (process.env.PDF_TO_WORD_ENGINE || 'libreoffice').toLowerCase();
-
-  async function textFallback() {
-    let text = '';
-    try {
-      const dataBuffer = await fs.readFile(inputPath);
-      const data = await pdfParse(dataBuffer);
-      text = data.text || '';
-    } catch (parseErr) {
-      console.warn('[pdfToWord] pdf-parse failed, using pdftotext:', parseErr.message);
-      const pdftotextCmd = process.env.PDFTOTEXT_BIN || (process.platform === 'win32' ? 'pdftotext.exe' : 'pdftotext');
-      const cmd = `"${pdftotextCmd}" -enc UTF-8 "${inputPath}" -`;
-      text = await new Promise((resolve, reject) => {
-        exec(cmd, { maxBuffer: 15 * 1024 * 1024, timeout: 2 * 60 * 1000 }, (err, stdout, stderr) => {
-          if (err) return reject(new Error(`pdftotext failed: ${stderr || err.message}`));
-          resolve(stdout || '');
-        });
-      });
-    }
-    const doc = new Document({ sections: [{ properties: {}, children: [new Paragraph(text || ' ')] }] });
-    const buffer = await Packer.toBuffer(doc);
-    await fs.writeFile(outputPath, buffer);
-    return res.download(outputPath, outputFilename, async (err) => {
-      await cleanup([inputPath, outputPath]);
-      if (err) console.error('Download error', err);
-    });
-  }
+  const engine = (req.body.engine || process.env.PDF_TO_WORD_ENGINE || 'auto').toLowerCase();
+  const outputDir = OUTPUT_DIR;
 
   try {
-    if (engine === 'cloud') {
-      return res.status(500).json({ error: 'PDF to Word cloud engine not configured. Set up cloud conversion provider and configure PDF_TO_WORD_CLOUD_API_KEY.' });
-    }
-
-    if (engine !== 'libreoffice' && engine !== 'text') {
-      return res.status(400).json({ error: 'Invalid PDF_TO_WORD_ENGINE. Valid values: libreoffice, text, cloud' });
-    }
-
-    if (engine === 'text') {
-      return await textFallback();
-    }
-
-    const sofficeCmd = process.env.LIBREOFFICE_BIN || (process.platform === 'win32' ? 'soffice.exe' : 'soffice');
-    const convertCmd = `"${sofficeCmd}" --headless --infilter=writer_pdf_import --convert-to docx --outdir "${OUTPUT_DIR}" "${inputPath}"`;
-    console.log('[pdfToWord] LibreOffice convert command:', convertCmd);
-
-    try {
-      await new Promise((resolve, reject) => {
-        exec(convertCmd, { timeout: 4 * 60 * 1000 }, (err, stdout, stderr) => {
-          console.log('[pdfToWord] soffice stdout:', stdout);
-          console.log('[pdfToWord] soffice stderr:', stderr);
-          if (err) return reject(err);
-          resolve();
-        });
-      });
-      if (await fs.pathExists(outputPath)) {
-        return res.download(outputPath, outputFilename, async (err) => {
-          await cleanup([inputPath, outputPath]);
-          if (err) console.error('Download error', err);
-        });
+    const convertedPath = await convertPdfToWord(inputPath, outputDir, { engine });
+    const outputFilename = path.basename(convertedPath);
+    res.download(convertedPath, outputFilename, async (err) => {
+      await cleanup([inputPath, convertedPath]);
+      if (err) {
+        console.error('[pdfToWord] download error', err);
       }
-    } catch (libreErr) {
-      console.warn('[pdfToWord] LibreOffice conversion failed:', libreErr.message || libreErr);
-    }
-
-    const odtPath = path.join(OUTPUT_DIR, path.basename(inputPath, path.extname(inputPath)) + '.odt');
-    const convertCmdOdt = `"${sofficeCmd}" --headless --convert-to odt --outdir "${OUTPUT_DIR}" "${inputPath}"`;
-    try {
-      await new Promise((resolve, reject) => {
-        exec(convertCmdOdt, { timeout: 4 * 60 * 1000 }, (err, stdout, stderr) => {
-          console.log('[pdfToWord] odt stdout:', stdout);
-          console.log('[pdfToWord] odt stderr:', stderr);
-          if (err) return reject(err);
-          resolve();
-        });
-      });
-      if (await fs.pathExists(odtPath)) {
-        const convertCmdDocx = `"${sofficeCmd}" --headless --convert-to docx --outdir "${OUTPUT_DIR}" "${odtPath}"`;
-        await new Promise((resolve, reject) => {
-          exec(convertCmdDocx, { timeout: 3 * 60 * 1000 }, (err, stdout, stderr) => {
-            console.log('[pdfToWord] odt->docx stdout:', stdout);
-            console.log('[pdfToWord] odt->docx stderr:', stderr);
-            if (err) return reject(err);
-            resolve();
-          });
-        });
-        if (await fs.pathExists(outputPath)) {
-          await cleanup([inputPath, odtPath]);
-          return res.download(outputPath, outputFilename, async (err) => {
-            await cleanup([outputPath]);
-            if (err) console.error('Download error', err);
-          });
-        }
-      }
-    } catch (odtErr) {
-      console.warn('[pdfToWord] ODT fallback failed:', odtErr.message || odtErr);
-    }
-
-    // final fallback to text
-    return await textFallback();
+    });
   } catch (err) {
     await cleanup([inputPath]);
-    res.status(500).json({ error: 'PDF to Word failed', details: err.message });
+    res.status(500).json({ error: 'PDF to Word conversion failed', details: err.message });
   }
 }
 
@@ -175,6 +84,9 @@ async function mergePdf(req, res) {
     const mergedPdf = await PDFDocument.create();
 
     for (const file of files) {
+      if (path.extname(file.originalname).toLowerCase() !== '.pdf') {
+        throw new Error('All files must be PDF for merge.');
+      }
       const data = await fs.readFile(file.path);
       const pdf = await PDFDocument.load(data);
       const copied = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
@@ -204,19 +116,45 @@ async function compressPdf(req, res) {
   const outputFilename = path.basename(inputPath, path.extname(inputPath)) + '-compressed.pdf';
   const outputPath = path.join(OUTPUT_DIR, outputFilename);
 
-  // Ghostscript binary - allow override via env
-  const gsCmd = process.env.GS_BIN || (process.platform === 'win32' ? 'gswin64c.exe' : 'gs');
-  // Typical command for Ghostscript compression
-  const cmd = `${gsCmd} -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/screen -dNOPAUSE -dQUIET -dBATCH -sOutputFile="${outputPath}" "${inputPath}"`;
-  console.log('[compressPdf] command:', cmd);
+  // Ghostscript binary - allow override via env.
+  // On Windows, prefer a known installed path if GS_BIN not set.
+  const windowsGsDefault = 'C:\\Program Files\\gs\\gs10.06.0\\bin\\gswin64c.exe';
+  const defaultGs = process.platform === 'win32' ? windowsGsDefault : 'gs';
+  const gsCmd = process.env.GS_BIN || defaultGs;
 
-  exec(cmd, { timeout: 2 * 60 * 1000 }, async (err, stdout, stderr) => {
+  // If GS_BIN is absolute and missing, return clear error.
+  if (path.isAbsolute(gsCmd) && !fs.existsSync(gsCmd)) {
+    await cleanup([inputPath]);
+    const msg = `Ghostscript binary not found at ${gsCmd}. Set GS_BIN to the correct executable path.`;
+    console.error('[compressPdf] failed:', msg);
+    return res.status(500).json({ error: 'Compression failed', details: msg });
+  }
+
+  const gsArgs = [
+    '-sDEVICE=pdfwrite',
+    '-dCompatibilityLevel=1.4',
+    '-dPDFSETTINGS=/screen',
+    '-dNOPAUSE',
+    '-dQUIET',
+    '-dBATCH',
+    `-sOutputFile=${outputPath}`,
+    inputPath,
+  ];
+  console.log('[compressPdf] command:', gsCmd, gsArgs.join(' '));
+
+  execFile(gsCmd, gsArgs, { timeout: 2 * 60 * 1000 }, async (err, stdout, stderr) => {
     console.log('[compressPdf] stdout:', stdout);
     console.log('[compressPdf] stderr:', stderr);
     if (err) {
       await cleanup([inputPath]);
       const detail = stderr || err.message;
       console.error('[compressPdf] failed:', detail);
+
+      if (err.code === 'ENOENT') {
+        const msg = `Ghostscript binary not found (${gsCmd}). Install Ghostscript and either add it to PATH or set GS_BIN to the full binary path.`;
+        return res.status(500).json({ error: 'Compression failed', details: msg });
+      }
+
       return res.status(500).json({ error: 'Compression failed', details: detail });
     }
 

@@ -10,6 +10,7 @@ export default function PdfToWord() {
   const [resultUrl, setResultUrl] = useState(null)
   const [resultName, setResultName] = useState('')
   const [error, setError] = useState(null)
+  const [engine, setEngine] = useState('libreoffice')
 
   function handleFiles(files) {
     setError(null)
@@ -30,6 +31,7 @@ export default function PdfToWord() {
     if (!file) return setError('No file selected')
     const formData = new FormData()
     formData.append('file', file)
+    formData.append('engine', engine)
 
     try {
       setProgress(0)
@@ -56,6 +58,15 @@ export default function PdfToWord() {
           <embed src={URL.createObjectURL(file)} type="application/pdf" width="100%" height="400px" />
         </div>
       )}
+      <div className="mt-3">
+        <label className="block text-sm font-medium">Conversion engine</label>
+        <select value={engine} onChange={(e) => setEngine(e.target.value)} className="mt-1 p-2 border rounded w-full">
+          <option value="libreoffice">LibreOffice (local)</option>
+          <option value="image">Image pages (exact visual fidelity, image-based)</option>
+          <option value="ocr">OCR text fallback (scanned PDFs to text + Word)</option>
+          <option value="cloud">Cloud (exact fidelity, requires API key)</option>
+        </select>
+      </div>
       {error && <div className="mt-3 text-red-600">{error}</div>}
       <div className="mt-4 flex items-center space-x-3">
         <button onClick={handleConvert} className="px-4 py-2 bg-blue-600 text-white rounded">Convert</button>
